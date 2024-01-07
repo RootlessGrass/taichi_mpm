@@ -182,12 +182,15 @@ class MPM : public Simulation<dim> {
 
   void rasterize_rigid_boundary();
 
+  // added
+  void reset_grid_granular_fluidity();
+
   void normalize_grid_and_apply_external_force(Vector velocity_increment);
 
   real calculate_energy();
 
-  void apply_grid_boundary_conditions(const DynamicLevelSet<dim> &levelset,
-                                      real t);
+  // apply grid boundary conditions --------------------------------------------
+  void apply_grid_boundary_conditions(const DynamicLevelSet<dim> &levelset, real t);
 
   void apply_dirichlet_boundary_conditions();
 
@@ -207,10 +210,9 @@ class MPM : public Simulation<dim> {
     return Vector(get_grid(ind).velocity_and_mass);
   }
 
+  void particle_bc_at_levelset(real t);  // added
   void particle_collision_resolution(real t);
-
   void rigid_body_levelset_collision(real t, real dt);
-
   void substep();
 
   template <typename T>
@@ -224,17 +226,11 @@ class MPM : public Simulation<dim> {
   }
 
   virtual void initialize(const Config &config) override;
-
   virtual std::string add_particles(const Config &config) override;
-
   virtual void step(real dt) override;
-
   std::vector<RenderParticle> get_render_particles() const override;
-
   void clear_boundary_particles();
-
   void rigidify(real dt);
-
   void advect_rigid_bodies(real dt);
 
   TC_FORCE_INLINE bool has_rigid_body() const {
@@ -254,16 +250,16 @@ class MPM : public Simulation<dim> {
   }
 
   virtual void visualize() const override;
-
   void write_partio(const std::string &file_name) const;
-
   void write_rigid_body(RigidBody<dim> const *rigid,
                         const std::string &file_name) const;
+  // added
+  void write_particle(const std::string &file_name) const;
+  void write_dataset(RigidBody<dim> const *rigid,
+                     const std::string &file_name) const;
 
   virtual void add_rigid_particle(Config config);
-
   virtual std::string get_debug_information() override;
-
   std::unique_ptr<RigidBody<dim>> create_rigid_body(Config config);
 
   bool near_boundary(const Particle &p) const {
@@ -275,6 +271,7 @@ class MPM : public Simulation<dim> {
     return false;
   }
 
+  // articulate ----------------------------------------------------------------
   void articulate(real delta_t) {
     int articulation_iterations =
         config_backup.get("articulation_iterations", 100);
@@ -317,9 +314,9 @@ class MPM : public Simulation<dim> {
       art->penalize(delta_t);
     }
   }
+  // end -----------------------------------------------------------------------
 
   virtual std::string general_action(const Config &config) override;
-
   void draw_cdf(const Config &config);
 
   RigidBody<dim> *get_rigid_body_ptr(int id) {
@@ -333,12 +330,33 @@ class MPM : public Simulation<dim> {
   void write_bgeo() const {
     ++(const_cast<MPM<dim> *>(this)->frame_count);
     std::string directory = config_backup.get_string("frame_directory");
-    std::string filename = fmt::format("{}/{:04}.bgeo", directory, frame_count);
-    write_partio(filename);
-    // Start from 1. (0 is the background rigid body.)
-    for (int i = 1; i < (int)rigids.size(); i++) {
-      filename = fmt::format("{}/rigid_{:03}_{:04}", directory, i, frame_count);
-      write_rigid_body(rigids[i].get(), filename);
+    std::string filename;
+
+    if (config_backup.get("write_partio", false)){
+      filename = fmt::format("{}/{:04}.bgeo", directory, frame_count);
+      write_partio(filename);
+    }
+
+    if (config_backup.get("write_rigid_body", false)){
+      // Start from 1 (0 is the background rigid body.)
+      for (int i = 1; i < (int)rigids.size(); i++) {
+        filename = fmt::format("{}/rigid_{:03}_{:04}", directory, i, frame_count);
+        write_rigid_body(rigids[i].get(), filename);
+      }
+    }
+
+    // added
+    if (config_backup.get("write_particle", false)){
+      // if (frame_count%50 == 0 || frame_count == 1) {
+        filename = fmt::format("{}/particle_{:04}", directory, frame_count);
+        write_particle(filename);
+      // }
+    }
+
+    // added
+    if (config_backup.get("write_dataset", false)){
+        filename = fmt::format("{}/ds_{:04}", directory, frame_count);
+        write_dataset(rigids[1].get(), filename);
     }
   }
 
@@ -359,7 +377,6 @@ class MPM : public Simulation<dim> {
   }
 
   virtual void sort_allocator();
-
   void sort_particles_and_populate_grid();
 
   template <typename T>
@@ -482,10 +499,8 @@ class MPM : public Simulation<dim> {
   }
 
   void update_rigid_page_map();
-
   std::string get_name() const override {
     return "mpm";
   }
 };
-
 TC_NAMESPACE_END

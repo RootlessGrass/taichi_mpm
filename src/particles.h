@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <iostream>
 #include <taichi/util.h>
 #include <taichi/math/svd.h>
 #include <taichi/math/array.h>
@@ -26,10 +27,8 @@ class MPMParticle : public Unit {
 
  public:
   Vector pos;
-  // Elastic deformation gradient
-  Matrix dg_e;
-  // Affine momemtum (APIC)
-  Matrix apic_b;
+  Matrix dg_e;  // Elastic deformation gradient
+  Matrix apic_b;  // Affine momemtum (APIC), c234
   Vector boundary_normal;
   real boundary_distance;
   real vol;
@@ -42,7 +41,47 @@ class MPMParticle : public Unit {
   uint32 states;
   int32 id;
   real debug;
+  Matrix dg_t;  // added: total deformation gradient
+  Matrix dg_p;  // added: plastic deformation gradient
+  Matrix T;  // added: stress tensor
+  real p;  // added: normal stress (pressure)
+  real tau;  // added: shear stress
+  real gf;  // added: granular fluidity
+  // real mu_visual;  // added: friction coeff (FOR VISUALIZATION ONLY)
+  // bool is_free;  // added (FOR VISUALIZATION ONLY)
+  Vector rigid_impulse;  // added: Impulses on rigid boundary particles
+  // Matrix apic_c;  // added: c567
+  // real dg_p_det;
+  // real dg_p_inv_det;
 
+  // keep the order
+  // TC_IO_DEF_VIRT(v_and_m,
+  //                pos,
+  //                dg_e,
+  //                apic_b,
+  //                boundary_normal,
+  //                boundary_distance,
+  //                vol,
+  //                dt_limit,
+  //                stiffness_limit,
+  //                cfl_limit,
+  //                sticky,
+  //                near_boundary_,
+  //                states,
+  //                id,
+  //                is_rigid_,
+  //                dg_t,
+  //                dg_p,
+  //                T,
+  //                p,
+  //                tau,
+  //                gf,
+  //                mu_visual,
+  //                is_free,
+  //                rigid_impulse,
+  //                dg_p_det,
+  //                dg_p_inv_det,
+  //               );
   TC_IO_DEF_VIRT(v_and_m,
                  pos,
                  dg_e,
@@ -57,7 +96,15 @@ class MPMParticle : public Unit {
                  near_boundary_,
                  states,
                  id,
-                 is_rigid_);
+                 is_rigid_,
+                 dg_t,
+                 dg_p,
+                 T,
+                 p,
+                 tau,
+                 gf,
+                 rigid_impulse
+                );
 
   TC_FORCE_INLINE bool is_rigid() const {
     return is_rigid_;
@@ -83,8 +130,12 @@ class MPMParticle : public Unit {
     v_and_m = _mm_blend_ps(v, v_and_m, 0x7);
   }
 
+  // TC_FORCE_INLINE real get_gf() const {
+  //   return gf;
+  // }
+
   MPMParticle() {
-    dg_e = Matrix(1.0f);
+    dg_e = Matrix(1.0_f);
     apic_b = Matrix(0);
     v_and_m = VectorP(0.0f);
     vol = 1.0f;
@@ -97,6 +148,18 @@ class MPMParticle : public Unit {
     near_boundary_ = false;
     id = 0;
     is_rigid_ = false;
+    dg_t = Matrix(1.0_f);
+    dg_p = Matrix(1.0_f);
+    T = Matrix(0.0_f);
+    p = 1.0_f;
+    tau = 0.0_f;
+    gf = 1.0_f;  // it should be set correctly, was 1 or 10
+    // mu_visual = 0.0_f;
+    // is_free = false;
+    rigid_impulse = Vector(0.0_f);
+    // apic_c = Matrix(0);
+    // dg_p_det = 1.0_f;
+    // dg_p_inv_det = 1.0_f;
   }
 
  public:
@@ -136,7 +199,7 @@ class MPMParticle : public Unit {
     return Matrix(0.0f);
   }
 
-  virtual int plasticity(const Matrix &cdg) {
+  virtual int plasticity(const Matrix &cdg, const real &laplacian_gf) {
     return 0;
   }
 
@@ -162,38 +225,11 @@ class MPMParticle : public Unit {
   virtual void set_lambda_and_mu_to_zero() {
   }
 
-  /*
-  real get_kenetic_energy() const {
-    return dot(v, v) * mass * 0.5f;
-  }
-
-  Vector get_momentum() const {
-    return mass * v;
-  }
-
-  real get_inertia(const real &dx) const {
-    return 0.5f * dx * dx * this->mass;
-  }
-
-  real get_rpic_angular_momentum(const real &dx) const {
-    return get_inertia(dx) * apic_b[1][0];
-  }
-
-  Vector get_momemtum() const {
-    return v * mass;
-  }
-
-  void apply_impulse(Vector impulse) {
-    v += (1.0f / mass) * impulse;
-  }
-  */
 };
 
 using MPMParticle2D = MPMParticle<2>;
 using MPMParticle3D = MPMParticle<3>;
-
 TC_INTERFACE(MPMParticle2D);
-
 TC_INTERFACE(MPMParticle3D);
 
 #define TC_REGISTER_MPM_PARTICLE(name)                                \

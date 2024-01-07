@@ -23,6 +23,7 @@
 
 TC_NAMESPACE_BEGIN
 
+// initialize ------------------------------------------------------------------
 template <int dim>
 void MPM<dim>::initialize(const Config &config) {
   TC_P(grid_block_size());
@@ -41,21 +42,25 @@ void MPM<dim>::initialize(const Config &config) {
   TC_ASSERT_INFO(!config.has_key("delta_t"),
                  "Please use 'base_delta_t' instead of 'delta_t'");
   base_delta_t = config.get("base_delta_t", 1e-4_f);
-  base_delta_t *= config.get("dt_multiplier", 1.0_f);
+  base_delta_t *= config.get("dt-multiplier", 1.0_f);
   reorder_interval = config.get<int>("reorder_interval", 1000);
+  // cfl number
   cfl = config.get("cfl", 1.0f);
   particle_gravity = config.get<bool>("particle_gravity", true);
+  // affine damping
   TC_LOAD_CONFIG(affine_damping, 0.0f);
 
+  // spgrid --------------------------------------------------------------------
   spgrid_size = 4096;
   while (spgrid_size / 2 > (res.max() + 1)) {
     spgrid_size /= 2;
   }
   TC_INFO("Created SPGrid of size {}", spgrid_size);
-
+  // 2D
   TC_STATIC_IF(dim == 2) {
     grid = std::make_unique<SparseGrid>(spgrid_size, spgrid_size);
   }
+  // 3D
   TC_STATIC_ELSE {
     grid = std::make_unique<SparseGrid>(spgrid_size, spgrid_size, spgrid_size);
   }
@@ -63,7 +68,15 @@ void MPM<dim>::initialize(const Config &config) {
   page_map = std::make_unique<SPGrid_Page_Map<log2_size>>(*grid);
   rigid_page_map = std::make_unique<SPGrid_Page_Map<log2_size>>(*grid);
   fat_page_map = std::make_unique<SPGrid_Page_Map<log2_size>>(*grid);
-  grid_region = Region(Vectori(0), res + VectorI(1), Vector(0));
+  grid_region = Region(Vectori(0), res + VectorI(1), Vector(0)); // start, end, offset
+
+  /*
+  // Restart?
+  pakua = create_instance<Pakua>("json");
+  Config config_;
+  config_.set("frame_directory", config.get_string("frame_directory"));
+  pakua->initialize(config_);
+  */
 
   if (config.get("energy_experiment", false)) {
     TC_ASSERT(config.get("optimized", true) == false);
@@ -74,22 +87,28 @@ void MPM<dim>::initialize(const Config &config) {
   rigids.back()->set_as_background();
 }
 
+// add particles ---------------------------------------------------------------
 template <int dim>
 std::string MPM<dim>::add_particles(const Config &config) {
   auto region = RegionND<dim>(Vectori(0), res);
+
   if (config.get_string("type") == "rigid") {
     add_rigid_particle(config);
     return std::to_string((int)rigids.size() - 1);
   } else {
+
+    // check if the particle is inside levelset --------------------------------
     auto detect_particles_inside_levelset = [&](const Vector &pos) {
+      // check if there is a levelset
       if (this->levelset.levelset0 == nullptr)
         return;
-      real phi = this->levelset.sample(pos * inv_delta_x, this->current_t);
+      real phi = this->levelset.sample(pos*inv_delta_x, this->current_t);
       if (phi < 0) {
         TC_WARN("Particles inside levelset generate.\n");
       }
     };
 
+    // global ------------------------------------------------------------------
     auto create_particle = [&](const Vector &coord, real maximum,
                                const Config &config) {
       ParticlePtr p_i;
@@ -110,6 +129,7 @@ std::string MPM<dim>::add_particles(const Config &config) {
 
       p->initialize(config_new);
       p->pos = coord;
+
       if (config_backup.get("sand_climb", false)) {
         std::shared_ptr<Texture> texture = AssetManager::get_asset<Texture>(
             config_backup.get<int>("sand_texture"));
@@ -126,14 +146,24 @@ std::string MPM<dim>::add_particles(const Config &config) {
         if (texture->sample(coord).x < y)
           return;
       }
+
+      // check if particle is near boundary in "mpm.h" -------------------------
       if (this->near_boundary(*p)) {
         TC_WARN("particle out of box or near boundary. Ignored.");
         return;
       }
+
+      // check if the particle is inside levelset ------------------------------
       detect_particles_inside_levelset(coord);
+
+      // global ----------------------------------------------------------------
       p->vol = pow<dim>(delta_x) / maximum;
-      p->set_mass(p->vol * config.get("density", 400.0f));
+      // p->vol = (4.0_f / 3.0_f * (real)M_PI * pow<3>(delta_x/2)) / maximum;
+
+      p->set_mass(p->vol * config.get("density", 400.0f) * config.get("packing_fraction", 1.0_f));
       p->set_velocity(config.get("initial_velocity", Vector(0.0f)));
+
+      // stork nod -------------------------------------------------------------
       if (config.get("stork_nod", 0.0_f) > 0.0_f) {
         real x = coord[0];
         real y = coord[1];
@@ -144,8 +174,12 @@ std::string MPM<dim>::add_particles(const Config &config) {
         v[1] = -0.5_f * d * linear;
         p->set_velocity(v);
       }
-      particles.push_back(p_i);
+
+      particles.push_back(p_i); // p_i: particle index
     };
+
+    // global ------------------------------------------------------------------
+    // benchmark
     int benchmark = config.get("benchmark", 0);
     if (benchmark) {
       TC_INFO("Generating particles for benchmarking");
@@ -163,10 +197,13 @@ std::string MPM<dim>::add_particles(const Config &config) {
         }
         int lower = (int)std::round(res[0] * (0.5_f - s));
         int higher = lower + (int)std::round(res[0] * 2 * s);
-        TC_P(lower);
-        TC_P(higher);
+        //TC_P(lower);
+        //TC_P(higher);
         Vector offset(0.25_f * this->delta_x);
-        for (auto ind : Region(Vectori(lower), Vectori(higher))) {
+        //----------------------------------------------------------------------
+        // create 8 particle per cell
+        for (auto ind : Region(Vector3i(res[0]*.2,res[0]*.125,res[0]*.2),
+                               Vector3i(res[0]*.4,res[0]*.175,res[0]*.4))) {
           for (int i = 0; i < 8; i++) {
             Vector sign(1);
             if (i % 2 == 0)
@@ -175,6 +212,7 @@ std::string MPM<dim>::add_particles(const Config &config) {
               sign[1] = -1;
             if (i / 4 % 2 == 0)
               sign[2] = -1;
+            // the followig func is called 8M times
             create_particle(ind.get_pos() * delta_x + offset * sign, 1, config);
           }
         }
@@ -184,6 +222,8 @@ std::string MPM<dim>::add_particles(const Config &config) {
       TC_P(particles.size());
       return "";
     }
+
+    // point cloud
     if (config.get("point_cloud", false)) {
       TC_STATIC_IF(dim == 3) {
         TC_INFO("Reading point cloud, fn={}",
@@ -202,22 +242,29 @@ std::string MPM<dim>::add_particles(const Config &config) {
       }
       TC_STATIC_ELSE{TC_NOT_IMPLEMENTED} TC_STATIC_END_IF
     } else {
+
+    // else (global) -----------------------------------------------------------
       std::shared_ptr<Texture> density_texture =
           AssetManager::get_asset<Texture>(config.get<int>("density_tex"));
       real maximum = 0.0f;
+      // region
       for (auto &ind : region) {
         Vector coord = (ind.get_ipos().template cast<real>() + Vector(0.5f)) *
                        this->delta_x;
         real sample = density_texture->sample(coord).x;
         maximum = std::max(sample, maximum);
       }
+      // pd sampler
       if (config.get("pd", true)) {
         PoissonDiskSampler<dim> sampler;
         std::vector<Vector> samples;
+        // write periodic pd
         if (config.get("pd_write_periodic_data", false)) {
           sampler.write_periodic_data();
         }
+        // periodic pd
         if (config.get("pd_periodic", true)) {
+          // source pd
           if (config.get("pd_source", false)) {
             Vector sample_offset =
                 config.get("initial_velocity", Vector(0.0f)) * this->current_t;
@@ -229,6 +276,7 @@ std::string MPM<dim>::add_particles(const Config &config) {
             sampler.sample_from_source(density_texture, region, this->delta_x,
                                        sample_offset, sample_advection,
                                        samples);
+          // packed pd
           } else if (config.get("pd_packed", false)) {
             std::shared_ptr<Texture> local_texture =
                 AssetManager::get_asset<Texture>(config.get<int>("local_tex"));
@@ -237,19 +285,25 @@ std::string MPM<dim>::add_particles(const Config &config) {
             sampler.sample_packed(density_texture, local_texture, region,
                                   this->delta_x, radius, gap, samples);
           } else {
+            // non-source & non-packed pd
             sampler.sample_from_periodic_data(density_texture, region,
                                               this->delta_x, samples);
           }
         } else {
-          sampler.sample(density_texture, region, this->delta_x, samples);
+          // non-periodic pd (from paper)
+          real minDistAH = config.get("minDistAH", -1.0f);
+          sampler.sample(density_texture, region,
+             this->delta_x, samples, minDistAH);
         }
         for (auto &coord : samples) {
+          // create particles
           create_particle(coord, maximum, config);
           if (config.get<bool>("only_one", false)) {
             break;
           }
         }
       } else {
+      // random sampler start
         TC_P(maximum);
         for (auto &ind : region) {
           for (int l = 0; l < maximum; l++) {
@@ -263,79 +317,129 @@ std::string MPM<dim>::add_particles(const Config &config) {
           }
         }
       }
+      // end of random sampler
     }
   }
   TC_P(particles.size());
   return "";
 }
 
+// render particles -------------------------------------------------------- OFF
 template <int dim>
 std::vector<RenderParticle> MPM<dim>::get_render_particles() const {
   return std::vector<RenderParticle>();
+  /*
+  std::vector<RenderParticle> render_particles;
+  render_particles.reserve(particles.size());
+  Vector center(res.template cast<real>() * 0.5f);
+  for (auto p_p : particles) {
+    Particle &p = *p_p;
+    // at least synchronize the position
+    Vector pos = p.pos * inv_delta_x - center;
+    render_particles.push_back(
+        RenderParticle(Vector3(pos), Vector4(0.8f, 0.9f, 1.0f, 0.5f)));
+  }
+  return render_particles;
+  */
 }
 
+// added: Reset grid granular fluidity
+template <int dim>
+void MPM<dim>::reset_grid_granular_fluidity() {
+  parallel_for_each_active_grid([&](GridState<dim> &g) {
+    g.granular_fluidity = 0.0_f;
+  });
+}
+
+// normalize grid & apply external force ---------------------------------------
 template <int dim>
 void MPM<dim>::normalize_grid_and_apply_external_force(
     Vector velocity_increment_) {
   VectorP velocity_increment(velocity_increment_, 0);
   parallel_for_each_active_grid([&](GridState<dim> &g) {
+    // dim'th elements of "velocity_and_mass" store mass
     real mass = g.velocity_and_mass[dim];
     if (mass > 0) {
       real inv_mass = 1.0_f / mass;
       VectorP alpha(Vector(inv_mass), 1);
-
       // Original:
-      // g.velocity_and_mass *= alpha; g.velocity_and_mass +=
-      // velocity_increment;
+      // g.velocity_and_mass *= alpha;
+      // g.velocity_and_mass += velocity_increment;
       g.velocity_and_mass =
-          fused_mul_add(g.velocity_and_mass, alpha, velocity_increment);
+          fused_mul_add(g.velocity_and_mass,
+            alpha, velocity_increment); // a*b + c from "vector.h"
     }
   });
 }
 
+// apply grid boundary conditions ----------------------------------------------
 template <int dim>
 void MPM<dim>::apply_grid_boundary_conditions(
     const DynamicLevelSet<dim> &levelset,
     real t) {
   int expr_leaky_levelset = config_backup.get<int>("expr_leaky_levelset", 0);
   real hack_velocity = config_backup.get<real>("hack_velocity", 0.0_f);
+
   int grid_block_size_max = grid_block_size().max();
+
   auto block_op = [&](uint32 b, uint64 block_offset, GridState<dim> *g) {
     Vectori block_base_coord(SparseMask::LinearToCoord(block_offset));
     Vector center = Vector(block_base_coord + grid_block_size() / Vectori(2));
+
+    //
     if (!expr_leaky_levelset && levelset.inside(center) &&
         std::abs(levelset.sample(center, t)) >= (real)grid_block_size_max) {
       return;
     }
+
+    //
     Region region(Vectori(0), grid_block_size());
     for (auto &ind_ : region) {
       Vectori ind = block_base_coord + ind_.get_ipos();
+
       if (grid_mass(ind) == 0.0f) {
         continue;
       }
+
+      // GRID position:
       Vector pos = Vector(ind);
       real phi;
       Vector n;
       Vector boundary_velocity;
       real mu;
 
+      //------------------------------------------------------------------------
+      // if grid node's -3 <= phi <= 0 (boundary grid) -------------------------
+      // and if not leaky levelset
       if (expr_leaky_levelset == 0) {
         phi = levelset.sample(pos, t);
-        if (phi < -3 || 0 < phi)
+        if (phi < -3 || 0 < phi)  // was 0 
           continue;
+        // normall to the levelset which its phi<0
         n = levelset.get_spatial_gradient(pos, t);
+
+        // if hack velocity is ON
         if (hack_velocity != 0.0_f) {
-          // if (length(offset) < 0.27_f) {
           if (0.5_f < pos.y * delta_x && pos.y * delta_x < 0.7_f &&
               t <= config_backup.get("hack_time", 0.0_f)) {
             boundary_velocity = hack_velocity * Vector::axis(0);
           } else {
             boundary_velocity = Vector(0);
           }
+        // main ----------------------------------------------------------------
         } else {
+          // for non-dynamic levelset, d(phi)/dt=0
           boundary_velocity =
               -levelset.get_temporal_derivative(pos, t) * n * delta_x;
+
+          // added: Grid granular fluidity boundary condition
+          get_grid(ind).granular_fluidity = 0.0_f;
         }
+
+        // boundary friction is the same as levelset friction ------------------
+        mu = levelset.levelset0->friction;
+
+        // sand speed ----------------------------------------------------------
         if (config_backup.get("sand_speed", 0.0_f) > 0) {
           real speed = config_backup.get("sand_speed", 0.0_f);
           real radius = 15.0_f / 180 * (real)M_PI;
@@ -343,15 +447,20 @@ void MPM<dim>::apply_grid_boundary_conditions(
           boundary_velocity.x = speed * (-cos(radius));
           boundary_velocity.y = speed * (-sin(radius));
         }
-        mu = levelset.levelset0->friction;
+
+        // gravity cutting -----------------------------------------------------
         if (config_backup.get("gravity_cutting", false)) {
           if (real(ind.y) > 0.7_f * res[1])
             mu = -1;
         }
+
+        // sand crawler --------------------------------------------------------
         if (config_backup.get("sand_crawler", false)) {
           if (real(ind.y) < 0.535_f * res[1])
             mu = -1;
         }
+
+      // leaky levelset (?) ----------------------------------------------------
       } else {
         int y = ind.y;
         if (res[1] / 2 - expr_leaky_levelset <= y && y < res[1] / 2) {
@@ -363,21 +472,30 @@ void MPM<dim>::apply_grid_boundary_conditions(
         mu = -1;
       }
 
+      // friction project returns: projected_relative_vel + boundary_velocity
+      // in "mpm_fwd.h"
       Vector v = friction_project(grid_velocity(ind), boundary_velocity, n, mu);
+
+      // VectorP has dim+1 number of elements (vector plus!)
       VectorP &v_and_m = get_grid(ind).velocity_and_mass;
+
+      // set v as boundary grid velocity
+      // dim'th elements of "v_and_m" stores mass
       v_and_m = VectorP(v, v_and_m[dim]);
     }
   };
   parallel_for_each_block_with_index(block_op, true);
 }
 
+// apply dirichlet boundary conditions (like sticky bc) ------------------------
+// 2D
 template <>
 void MPM<2>::apply_dirichlet_boundary_conditions() {
-  real distance = config_backup.get("dirichlet_boundary_radius", 0.0_f);
+  real distance   = config_backup.get("dirichlet_boundary_radius", 0.0_f);
   real distance_l = config_backup.get("dirichlet_distance_left", distance);
   real distance_r = config_backup.get("dirichlet_distance_right", distance);
 
-  real velocity = config_backup.get("dirichlet_boundary_velocity", 0.0_f);
+  real velocity   = config_backup.get("dirichlet_boundary_velocity", 0.0_f);
   real velocity_l = config_backup.get("dirichlet_boundary_left", velocity);
   real velocity_r = config_backup.get("dirichlet_boundary_right", velocity);
 
@@ -397,7 +515,7 @@ void MPM<2>::apply_dirichlet_boundary_conditions() {
     }
   }
 }
-
+// 3D
 template <>
 void MPM<3>::apply_dirichlet_boundary_conditions() {
   for (auto &ind_ : grid_region) {
@@ -409,22 +527,70 @@ void MPM<3>::apply_dirichlet_boundary_conditions() {
           VectorP(v, get_grid(ind).velocity_and_mass[3]);
     }
   }
+  //  real radius = config_backup.get("dirichlet_boundary_radius", 0.0_f);
+  //  real linear_v =
+  //      config_backup.get("dirichlet_boundary_linear_velocity", 0.0_f);
+  //
+  //  TC_ASSERT_INFO(!config_backup.has_key("dirichlet_boundary_angular_velocity"),
+  //                 "Use 'dirichlet_boundary_rotation_cycle' instead of "
+  //                 "'dirichlet_boundary_angular_velocity'.")
+  //  real rotation_cycle =
+  //      config_backup.get("dirichlet_boundary_rotation_cycle", 0.0_f);
+  //  for (auto &ind_ : grid_region) {
+  //    Vectori ind = ind_.get_ipos();
+  //    Vector pos = Vector(ind) * delta_x;
+  //    real dist_to_x = sqrt(sqr(pos[1] - 0.5_f) + sqr(pos[2] - 0.5_f));
+  //    if (sqrt(sqr(pos[0] - 0.5f) + sqr(pos[1] - 0.5_f) + sqr(pos[2] - 0.5_f))
+  //    <
+  //        radius) {
+  //      Vector v;
+  //      // avoid atan2(0, 0)
+  //      if (dist_to_x < eps) {
+  //        v = Vector(linear_v, 0.0_f, 0.0_f);
+  //      } else {
+  //        real rotation_angle = atan2(pos[1] - 0.5_f, pos[2] - 0.5_f);
+  //        real rotation_speed;
+  //        if (rotation_cycle > 0.0_f) {
+  //          rotation_speed = dist_to_x * 2.0_f * M_PI / rotation_cycle;
+  //        } else {
+  //          rotation_speed = 0.0_f;
+  //        }
+  //        v = Vector(linear_v, rotation_speed * cos(rotation_angle),
+  //                   -rotation_speed * sin(rotation_angle));
+  //      }
+  //      get_grid(ind).velocity_and_mass =
+  //          VectorP(v, get_grid(ind).velocity_and_mass[3]);
+  //    }
+  //  }
 }
 
+// particle-levelset interaction -------------------------------------- : ON/OFF
 template <int dim>
 void MPM<dim>::particle_collision_resolution(real t) {
   parallel_for_each_particle([&](Particle &p) {
     Vector pos = p.pos * inv_delta_x;
     real phi = this->levelset.sample(pos, t);
-    if (phi < 0) {
+    // if there is collision (phi<0)
+    if (phi <= 0.25) {
       Vector gradient = this->levelset.get_spatial_gradient(pos, t);
       p.pos -= gradient * phi * delta_x;
-      p.set_velocity(p.get_velocity() -
-                     dot(gradient, p.get_velocity()) * gradient);
+      p.set_velocity(p.get_velocity()-dot(gradient, p.get_velocity())*gradient);
     }
   });
 }
 
+// added: particle_bc_at_levelset ------------------------------------- : ON/OFF
+template <int dim>
+void MPM<dim>::particle_bc_at_levelset(real t) {
+  parallel_for_each_particle([&](Particle &p) {
+    Vector pos = p.pos * inv_delta_x;
+    real phi = this->levelset.sample(pos, t);
+    if (phi < 0.25)
+      p.gf = 0.0_f;
+  });
+}
+
+// step ------------------------------------------------------------------------
 template <int dim>
 void MPM<dim>::step(real dt) {
   if (dt < 0) {
@@ -449,10 +615,12 @@ void MPM<dim>::step(real dt) {
   TC_WARN("Times of particle updating : {}", update_counter);
 }
 
+//------------------------------------------------------------------------------
+// MPM subset (MAIN LOOP) ------------------------------------------------------
 template <int dim>
 void MPM<dim>::substep() {
   Profiler _p("mpm_substep");
-  cutting_counter = 0;
+  cutting_counter    = 0;
   plasticity_counter = 0;
   const real delta_t = base_delta_t;
   if (particles.empty()) {
@@ -461,15 +629,27 @@ void MPM<dim>::substep() {
     // TC_DEBUG("dt = {}, Do substep for {} particles, ", base_delta_t,
     // particles.size());
   }
+
   TC_PROFILE("sort_particles_and_populate_grid",
              sort_particles_and_populate_grid());
+
+  // added: Reset grid granular fluidity
+  TC_PROFILE("reset_grid_granular_fluidity",
+              reset_grid_granular_fluidity());
+
+  // articulate ----------------------------------------------------------------
   if (has_rigid_body()) {
     for (int i = 0; i < config_backup.get("coupling_iterations", 1); i++) {
+      // check rigidBody collision --------------------------------------- : OFF
       TC_PROFILE("rigidify", rigidify(delta_t));
+      // rigid body articulation in "mpm.h" ------------------------------------
       TC_PROFILE("articulate", articulate(delta_t));
+      // modified (CDF)
       TC_PROFILE("rasterize_rigid_boundary", rasterize_rigid_boundary());
     }
   }
+
+  // visualize CDF ------------------------------------------------------- : OFF
   if (config_backup.get("visualize_cdf", false)) {
     int counter = 0;
     for (auto &ind : grid_region) {
@@ -485,6 +665,8 @@ void MPM<dim>::substep() {
     substep_counter += 1;
     return;
   }
+
+  // visualize particle CDF ---------------------------------------------- : OFF
   if (config_backup.get("visualize_particle_cdf", false)) {
     int counter = 0;
     for (auto &ind : grid_region) {
@@ -503,13 +685,25 @@ void MPM<dim>::substep() {
     substep_counter += 1;
     return;
   }
+
+  // gather CDF ----------------------------------------------------------------
   if (has_rigid_body()) {
     TC_PROFILE("gather_cdf", gather_cdf());
   }
+
+  // added: particle bc near levelsets -------------------------------- : On/OFF
+  if (config_backup.get("particle_bc_at_levelset", false)) {
+    TC_PROFILE("particle_bc_at_levelset",
+      particle_bc_at_levelset(this->current_t));
+  }
+
+  // rasterize (particle to grid) ----------------------------------------------
   if (!config_backup.get("benchmark_rasterize", false)) {
+    // optimized : ON
     if (config_backup.get("optimized", true)) {
-      TC_PROFILE_TPE("P2G optimized", rasterize_optimized(delta_t),
-                     particles.size());
+      TC_PROFILE_TPE("P2G optimized",
+      rasterize_optimized(delta_t), particles.size());
+    // else : OFF
     } else {
       TC_PROFILE_TPE("P2G", rasterize(delta_t), particles.size());
     }
@@ -523,30 +717,37 @@ void MPM<dim>::substep() {
     }
   }
 
+  // add gravity to grid instead of particles ----------------------------------
   Vector gravity_velocity_increment = gravity * delta_t;
   if (particle_gravity) {
-    // Add gravity to particles instead of grid
     gravity_velocity_increment = Vector(0);
   }
   TC_PROFILE(
       "normalize_grid_and_apply_external_force",
       normalize_grid_and_apply_external_force(gravity_velocity_increment));
 
+  // rigidBody-levelset collision ---------------------------------------- : OFF
   if (config_backup.get("rigid_body_levelset_collision", false)) {
     TC_PROFILE("rigid_body_levelset_collision",
-               rigid_body_levelset_collision(this->current_t, delta_t));
+      rigid_body_levelset_collision(this->current_t, delta_t));
   }
-  TC_PROFILE("boundary_condition",
-             apply_grid_boundary_conditions(this->levelset, this->current_t));
 
+  // boundary condition --------------------------------------------------------
+  TC_PROFILE("boundary_condition",
+    apply_grid_boundary_conditions(this->levelset, this->current_t));
+
+  // ---------------------------------------------------------------------------
   if (config_backup.get("dirichlet_boundary_radius", 0.0_f) > 0.0_f) {
     TC_PROFILE("apply_dirichlet_boundary_conditions",
-               apply_dirichlet_boundary_conditions());
+      apply_dirichlet_boundary_conditions());
   }
 
+  // resample (grid to particle) -----------------------------------------------
   if (!config_backup.get("benchmark_resample", false)) {
+    // optimized : ON
     if (config_backup.get("optimized", true)) {
       TC_PROFILE_TPE("G2P optimized", resample_optimized(), particles.size());
+    // else : OFF
     } else {
       TC_PROFILE_TPE("G2P", resample(), particles.size());
     }
@@ -560,25 +761,35 @@ void MPM<dim>::substep() {
       }
     }
   }
+
+  // clean boundary particles --------------------------------------------------
   if (config_backup.get("clean_boundary", true)) {
     TC_PROFILE("clean boundary", clear_boundary_particles());
   }
+
+  // particle collision ------------------------------------------------ : On/OFF
   if (config_backup.get("particle_collision", false)) {
     TC_PROFILE("particle_collision",
-               particle_collision_resolution(this->current_t));
+      particle_collision_resolution(this->current_t));
   }
+
+  // advect rigid body ---------------------------------------------------------
   if (has_rigid_body()) {
     TC_PROFILE("advect_rigid_bodies", advect_rigid_bodies(delta_t));
   }
+
   this->current_t += delta_t;
   substep_counter += 1;
 }
+// subset end ------------------------------------------------------------------
+//------------------------------------------------------------------------------
 
 template <int dim>
 bool MPM<dim>::test() const {
   return true;
 }
 
+// clear boundary particles ----------------------------------------------------
 template <int dim>
 void MPM<dim>::clear_boundary_particles() {
   std::vector<ParticlePtr> particles_new;
@@ -624,7 +835,7 @@ void MPM<dim>::clear_boundary_particles() {
   if (!has_deleted && this->current_t >= 0.1)
     has_deleted = true;
   int deleted = (int)particles.size() - (int)particles_new.size();
-  if (deleted != 0 && config_backup.get("warn_particle_deletion", false)) {
+  if (deleted != 0 && config_backup.get("warn_particle_deletion", true)) {
     TC_WARN(
         "{} boundary (or abnormal) particles deleted.\n{} Particles remained\n",
         deleted, particles_new.size());
@@ -632,6 +843,7 @@ void MPM<dim>::clear_boundary_particles() {
   particles = particles_new;
 }
 
+// get debug information -------------------------------------------------------
 template <int dim>
 std::string MPM<dim>::get_debug_information() {
   // return std::to_string(rigids[1].velocity.x);
@@ -668,10 +880,11 @@ Array2D<T> vertical_stack(const Array2D<T> &a, const Array2D<T> &b) {
   return merged;
 }
 
+// draw cdf --------------------------------------------------------------------
+// 2D
 template <>
 void MPM<2>::draw_cdf(const Config &config) {
   // Step 1: sample particles
-
   int scale = 5;
 
   for (int i = 7; i < (res[0] - 7) * scale; i++) {
@@ -686,17 +899,12 @@ void MPM<2>::draw_cdf(const Config &config) {
       particles.push_back(alloc.first);
     }
   }
-
   base_delta_t = 0.001;
-
   TC_P("seeded");
-
   for (int i = 0; i < 5; i++) {
     substep();
   }
-
   TC_P("stepped");
-
   Array2D<Vector3> img_dist, img_affinity, img_normal;
   img_dist.initialize(res * scale);
   img_affinity.initialize(res * scale);
@@ -718,7 +926,6 @@ void MPM<2>::draw_cdf(const Config &config) {
       img_normal[ipos] = Vector3(p.boundary_normal * 0.5_f + Vector(0.5_f));
     }
   }
-
   auto merged_lower =
       horizontal_stack(horizontal_stack(img_dist, img_affinity), img_normal);
 
@@ -728,30 +935,26 @@ void MPM<2>::draw_cdf(const Config &config) {
     Vectori ipos = ind.get_ipos() / Vectori(scale);
     img_dist[ind] = Vector3(get_grid(ipos).get_distance() * inv_delta_x * 0.2f);
     Vector3 affinity_color;
-
     auto states = get_grid(ipos).get_states();
     affinity_color.x = states % 4 * 0.33_f;
     affinity_color.y = states / 4 % 4 * 0.33_f;
     affinity_color.z = states / 16 % 4 * 0.33_f;
     img_affinity[ind] = Vector3(affinity_color);
   }
-
   auto merged_upper =
       horizontal_stack(horizontal_stack(img_dist, img_affinity), img_normal);
-
   auto merged = vertical_stack(merged_lower, merged_upper);
-
   merged.write_as_image("/tmp/cdf.png");
 }
 
+// 3D
 template <>
 void MPM<3>::draw_cdf(const Config &config) {
   TC_NOT_IMPLEMENTED
 }
-
 template <int dim>
 void MPM<dim>::sort_allocator() {
-  TC_TRACE("Reording particles");
+  TC_TRACE("Reordering particles");
   Time::Timer _("reorder");
 
   std::swap(allocator.pool_, allocator.pool);
@@ -767,6 +970,7 @@ void MPM<dim>::sort_allocator() {
   allocator.gc(particles.size());
 }
 
+// sort particles & populate grid ----------------------------------------------
 template <int dim>
 void MPM<dim>::sort_particles_and_populate_grid() {
   // Profiler::disable();
@@ -813,7 +1017,6 @@ void MPM<dim>::sort_particles_and_populate_grid() {
   }
 
   // Reset page_map
-
   {
     Profiler _("reset page map");
     page_map->Clear();
@@ -917,9 +1120,12 @@ void MPM<dim>::sort_particles_and_populate_grid() {
   TC_STATIC_END_IF
 }
 
+// general actions -------------------------------------------------------------
 template <int dim>
 std::string MPM<dim>::general_action(const Config &config) {
   std::string action = config.get<std::string>("action");
+
+  // add articulation ----------------------------------------------------------
   if (action == "add_articulation") {
     Config new_config = config;
     new_config.set("obj0", rigids[config.get<int>("obj0")].get());
@@ -931,13 +1137,21 @@ std::string MPM<dim>::general_action(const Config &config) {
     auto art = create_instance_unique<Articulation<dim>>(
         config.get<std::string>("type"), new_config);
     articulations.push_back(std::move(art));
+
+  // draw cdf ------------------------------------------------------------------
   } else if (action == "cdf") {
     draw_cdf(config);
+
+  // save ----------------------------------------------------------------------
   } else if (action == "save") {
     TC_P(this->get_name());
     write_to_binary_file_dynamic(this, config.get<std::string>("file_name"));
+
+  // calculate energy ----------------------------------------------------------
   } else if (action == "calculate_energy") {
     return fmt::format("{}", calculate_energy());
+
+  // load rigid body from binary file ------------------------------------------
   } else if (action == "load") {
     read_from_binary_file_dynamic(this, config.get<std::string>("file_name"));
     for (auto &r : rigids) {
@@ -956,6 +1170,8 @@ std::string MPM<dim>::general_action(const Config &config) {
         TC_INFO("scripted rotation loaded");
       }
     }
+
+  // delete particles inside level set -----------------------------------------
   } else if (action == "delete_particles_inside_level_set") {
     std::vector<ParticlePtr> particles_new;
     int deleted = 0;
@@ -976,17 +1192,14 @@ std::string MPM<dim>::general_action(const Config &config) {
   }
   return "";
 }
-
 template std::string MPM<2>::general_action(const Config &config);
 template std::string MPM<3>::general_action(const Config &config);
-
 using MPM2D = MPM<2>;
 using MPM3D = MPM<3>;
-
 TC_IMPLEMENTATION(Simulation2D, MPM2D, "mpm");
-
 TC_IMPLEMENTATION(Simulation3D, MPM3D, "mpm");
 
+// mpm serialization -----------------------------------------------------------
 TC_TEST("mpm_serialization") {
   std::string fn = "/tmp/snapshot.tcb", fn2;
   MPM<3> mpm, mpm_loaded;
@@ -994,21 +1207,17 @@ TC_TEST("mpm_serialization") {
   mpm.res = Vector3i(42, 95, 63);
   mpm.delta_x = 1024;
   mpm.inv_delta_x = 1025;
-
   write_to_binary_file(mpm, fn);
   read_from_binary_file(mpm_loaded, fn);
   if (remove(fn.c_str()) != 0) {
     TC_WARN("Error occur when deleting binary file.");
   }
-
 #define CHECK_LOADED(x) CHECK(mpm_loaded.x == mpm.x)
-
   CHECK_LOADED(res);
   CHECK_LOADED(penalty);
   CHECK_LOADED(delta_x);
   CHECK_LOADED(inv_delta_x);
   // CHECK_LOADED(grid_region);
-
   std::vector<Element<2>> elems, elems2;
   elems.resize(1000);
   write_to_binary_file(elems, fn);
@@ -1018,19 +1227,18 @@ TC_TEST("mpm_serialization") {
   }
 }
 
+// update rigid page map -------------------------------------------------------
+// 2D
 template <>
 void MPM<2>::update_rigid_page_map() {
   TC_NOT_IMPLEMENTED
 }
-
+// 3D
 template <>
 void MPM<3>::update_rigid_page_map() {
   constexpr int dim = 3;
-
   auto block_size = grid_block_size();
-
   rigid_page_map->Clear();
-
   std::vector<int> block_has_rigid(page_map->Get_Blocks().second, 0);
   auto block_op = [&](uint32 b, uint64 block_offset, GridState<dim> *g) {
     int particle_begin;
@@ -1050,9 +1258,7 @@ void MPM<3>::update_rigid_page_map() {
     }
   };
   parallel_for_each_block_with_index(block_op, false, false);
-
   auto blocks = page_map->Get_Blocks();
-
   // We do not have thread-safe Set_Page...
   for (uint i = 0; i < blocks.second; i++) {
     auto offset = blocks.first[i];
@@ -1069,12 +1275,12 @@ void MPM<3>::update_rigid_page_map() {
       }
     }
   }
-
   rigid_page_map->Update_Block_Offsets();
   rigid_block_fractions.push_back(1.0_f * rigid_page_map->Get_Blocks().second /
                                   fat_page_map->Get_Blocks().second);
 }
 
+// calculate energy ------------------------------------------------------------
 template <int dim>
 real MPM<dim>::calculate_energy() {
   sort_particles_and_populate_grid();

@@ -15,7 +15,7 @@ TC_NAMESPACE_BEGIN
 
 void check_scripting_parameters(const Config &config) {
   TC_ASSERT_INFO(!config.has_key("scripted"),
-                 "'scripted' is deprecated. Please remove.");
+                 "'scripted' is deprecated. Please remove."); ///////////// ????
   TC_ASSERT_INFO(!config.has_key("position"),
                  "Use 'initial_position' instead of 'position'.")
   TC_ASSERT_INFO(!config.has_key("rotation"),
@@ -55,6 +55,7 @@ void check_scripting_parameters(const Config &config) {
   }
 }
 
+// create rigid body, called from this file ------------------------------------
 template <int dim>
 std::unique_ptr<RigidBody<dim>> MPM<dim>::create_rigid_body(Config config) {
   std::unique_ptr<RigidBody<dim>> rigid_ptr =
@@ -83,10 +84,13 @@ std::unique_ptr<RigidBody<dim>> MPM<dim>::create_rigid_body(Config config) {
   typename RigidBody<dim>::RotationFunctionType *g =
       (typename RigidBody<dim>::RotationFunctionType *)config.get(
           "scripted_rotation", (uint64)0);
+
+  // if there is scripted pos (f) ----------------------------------------------
   if (f) {
     rigid.pos_func = *f;
     rigid.pos_func_id = config.get<int>("scripted_position_id");
   }
+  // if there is scripted rot (g) ----------------------------------------------
   if (g) {
     rigid.rot_func = *g;
     rigid.rot_func_id = config.get<int>("scripted_rotation_id");
@@ -94,14 +98,19 @@ std::unique_ptr<RigidBody<dim>> MPM<dim>::create_rigid_body(Config config) {
 
   MatrixP mesh_to_world(1.0_f);
 
+  // initial values ------------------------------------------------------------
   Vector initial_position;
+  // if there is scripted pos (f)
   if (f) {
     initial_position = (*f)(this->current_t);
+  // else
   } else {
     initial_position = config.get<Vector>("initial_position");
   }
   rigid.position = initial_position;
 
+  // rotation value ------------------------------------------------------------
+  // 2d
   TC_STATIC_IF(dim == 2) {
     real angle = 0;
     if (g) {
@@ -111,13 +120,18 @@ std::unique_ptr<RigidBody<dim>> MPM<dim>::create_rigid_body(Config config) {
     }
     rigid.rotation = Rotation<2>(radians(angle));
   }
+
+  // 3d ----------
   TC_STATIC_ELSE {
     Vector euler;
+    // if there is scripted rot (g)
     if (rigid.rot_func) {
       euler = rigid.rot_func(this->current_t);
+    // else
     } else {
       euler = config.get("initial_rotation", Vector(0.0_f));
     }
+    // quaternion : rotation value (q)
     euler = radians(euler);
     Eigen::Quaternion<real> q =
         Eigen::AngleAxis<real>(euler[0], Eigen::Matrix<real, 3, 1>::UnitX()) *
@@ -126,21 +140,28 @@ std::unique_ptr<RigidBody<dim>> MPM<dim>::create_rigid_body(Config config) {
     rigid.rotation.value = q;
   }
   TC_STATIC_END_IF
+
+  // rotation axis -------------------------------------------------------------
   if (dim == 3) {
     rigid.rotation_axis = config.get<Vector>("rotation_axis", Vector(0.0_f));
   }
+
   return rigid_ptr;
 }
 
+// add rigid particle, called from mpm.cpp -------------------------------------
 template <int dim>
 void MPM<dim>::add_rigid_particle(Config config) {
+
+  // create rigid body
   auto rigid_ptr = create_rigid_body(config);
   auto &rigid = *rigid_ptr;
 
   // This config is for particles
+  // particle type
   Config config_new = config;
   config_new.set("rigid", &rigid);
-
+  // rigid particle density
   real density;
   if (config.get<bool>("codimensional")) {
     density = config.get("density", 40.0f);
@@ -148,18 +169,15 @@ void MPM<dim>::add_rigid_particle(Config config) {
     density = config.get("density", 400.0f);
   }
 
+  // add boundary particle, called from this file ------------------------------
   std::vector<ParticlePtr> added_particles;
-
   auto add_boundry_particle = [&](
-      Vector position, Vector normal,
-      typename RigidBody<dim>::ElementType *untransformed) {
-
+    Vector position, Vector normal,
+    typename RigidBody<dim>::ElementType *untransformed) {
     config_new.set("normal", normal)
         .set("rigid", &rigid)
         .set("offset", position - rigid.position);
-
     auto alloc = allocator.allocate_particle("rigid_boundary");
-
     RigidBoundaryParticle<dim> *p =
         static_cast<RigidBoundaryParticle<dim> *>(alloc.second);
     p->pos = position;
@@ -168,18 +186,14 @@ void MPM<dim>::add_rigid_particle(Config config) {
     added_particles.push_back(alloc.first);
   };
 
+  // mesh ----------------------------------------------------------------------
   rigid.mesh = std::make_unique<typename RigidBody<dim>::MeshType>();
-
   auto &mesh = rigid.mesh;
   mesh->initialize(config);
-
   Vector center_of_mass;
   // Initialize position and rotation
-
   Vector scale = config.get<Vector>("scale", Vector(1.0_f));
-
   Vector initial_position = rigid.position;
-
   // First, scale to make sure we have the correct mass and inertia
   auto &elements = rigid.mesh->elements;
   for (auto &elem : elements) {
@@ -187,7 +201,6 @@ void MPM<dim>::add_rigid_particle(Config config) {
       elem.v[k] = scale * elem.v[k];
     }
   }
-
   // Second, compute center of mass
   center_of_mass = rigid.initialize_mass_and_inertia(density);
   if (!config.get("recenter", true)) {
@@ -195,24 +208,23 @@ void MPM<dim>::add_rigid_particle(Config config) {
     TC_ASSERT(rigid.rot_func);
     center_of_mass = Vector(0);
   }
-
+  // if there is scripted pos
   if (rigid.pos_func) {
-    rigid.set_infinity_mass();
+    // rigid.set_infinity_mass();  // removed
   }
+  // if there is scripted rot
   if (rigid.rot_func) {
     rigid.set_infinity_inertia();
   }
-
   // Third, translate to make sure the mesh has its center of mass at the origin
   for (auto &elem : elements) {
     for (int k = 0; k < dim; k++) {
       elem.v[k] = elem.v[k] - center_of_mass;
     }
   }
-
-  // First set rigid centoid to be origin, so that particles get correct offsets
+  // Forth set rigid centoid to be origin, so that particles get correct offsets
   rigid.position = Vector(0.0_f);
-
+  // 2d
   TC_STATIC_IF(dim == 2) {
     for (auto &elem : elements) {
       Vector a = elem.v[0], b = elem.v[1];
@@ -225,10 +237,9 @@ void MPM<dim>::add_rigid_particle(Config config) {
       }
     }
   }
+  // 3d
   TC_STATIC_ELSE {
-    // Rotation axis restriction (3D only)
     rigid.rotation_axis = config.get("rotation_axis", Vector(0.0_f));
-
     for (auto &elem : elements) {
       std::vector<Vector> positions;
       Vector x_n = normalize(elem.v[1] - elem.v[0]);
@@ -247,13 +258,14 @@ void MPM<dim>::add_rigid_particle(Config config) {
           positions.push_back(position);
         }
       for (auto &position : positions)
+        // add boundary particle
         add_boundry_particle(position, elem.get_normal(), &elem);
     }
-
     TC_TRACE("Mesh #elements = {}", mesh->elements.size());
   }
   TC_STATIC_END_IF
 
+  // check rigid particle position ---------------------------------------------
   rigid.position = initial_position;
   for (auto &p_i : added_particles) {
     auto p = static_cast<RigidBoundaryParticle<dim> *>(allocator[p_i]);
@@ -270,39 +282,52 @@ void MPM<dim>::add_rigid_particle(Config config) {
   TC_TRACE("#Particles: {}", particles.size());
 }
 
+// advect rigid bodies ---------------------------------------------------------
 template <int dim>
 void MPM<dim>::advect_rigid_bodies(real dt) {
+
   for (auto &r : rigids) {
     auto &rigid = *r;
+    // rotation axis
     if (rigid.rotation_axis.abs_max() > 0.1_f) {
       rigid.enforce_angular_velocity_parallel_to(rigid.rotation_axis);
     }
 
-    rigid.advance(this->current_t, dt);
+    // rigid body gravity 
+    if (config_backup.get("rigidBody_gravity", true)) {  // added
+      rigid.apply_impulse(this->gravity * rigid.get_mass() * dt, rigid.position);
+    }
+    
+    int free_axis_in_position = config_backup.get("free_axis_in_position", 0); // added
 
-    rigid.apply_impulse(this->gravity * rigid.get_mass() * dt, rigid.position);
+    // advance
+    rigid.advance(this->current_t, dt, free_axis_in_position);  // added
 
+    // rotation axis
     if (rigid.rotation_axis.abs_max() > 0.1_f) {
       rigid.enforce_angular_velocity_parallel_to(rigid.rotation_axis);
     }
-
-    if (config_backup.get("print_rigid_body_state", false)) {
+    // print rigid body state
+    if (config_backup.get("print_rigid_body_state", true)) {
       // TC_P(rigid->get_mass());
       // TC_P(rigid->get_inertia());
       TC_P(rigid.position);
-      TC_P(rigid.rotation.value);
+      // TC_P(rigid.rotation.value);
       TC_P(rigid.velocity);
       TC_P(rigid.angular_velocity.value);
     }
   }
+  // align particle with rigid body --------------------------------------------
   parallel_for_each_particle([](Particle &p_) {
     if (p_.is_rigid()) {
       auto *p = dynamic_cast<RigidBoundaryParticle<dim> *>(&p_);
       p->align_with_rigid_body();
     }
   });
+
 }
 
+// rigid body collision -------------------------------------------------- : OFF
 template <int dim>
 void MPM<dim>::rigidify(real dt) {
   if (!config_backup.get<bool>("rigid_body_collision", true)) {
@@ -317,11 +342,9 @@ void MPM<dim>::rigidify(real dt) {
     }
     TC_STATIC_END_IF
   }
-
   if (!collisions.size()) {
     return;
   }
-
   {
     Profiler _("collision resolution");
     int iterations = config_backup.get("rigid_body_iterations", 5);
@@ -344,30 +367,32 @@ void MPM<dim>::rigidify(real dt) {
   }
 }
 
+// rigid body-levelset collision ----------------------------------------- : OFF
 template <int dim>
 void MPM<dim>::rigid_body_levelset_collision(real t, real delta_t) {
+  // particle
   for (auto &p_i : particles) {
     auto &p = *allocator[p_i];
+    // rigid particle
     if (p.is_rigid()) {
-      Vector pos = p.pos * inv_delta_x;
-      real phi = this->levelset.sample(pos, t);
-      Vector gradient = this->levelset.get_spatial_gradient(pos, t);
+      Vector pos        = p.pos * inv_delta_x;           // magnified pos
+      real phi          = this->levelset.sample(pos, t); // levelset func
+      Vector gradient   = this->levelset.get_spatial_gradient(pos, t);
       RigidBody<dim> *r = dynamic_cast<RigidBoundaryParticle<dim> *>(&p)->rigid;
 
+      // if rigid particle is not in the desired place
       if (phi < 0) {
-        real friction = r->frictions[0];
+        real friction     = r->frictions[0];
         real cRestitution = r->restitution;
-        Vector v10 = r->get_velocity_at(p.pos);
-        Vector r0 = p.pos - r->position;
-        real v0 = dot(gradient, v10);
+        Vector v10        = r->get_velocity_at(p.pos);
+        Vector r0         = p.pos - r->position;
+        real v0           = dot(gradient, v10);
 
         real J = -((1 + cRestitution) * v0) *
                  inversed(r->get_impulse_contribution(r0, gradient));
-
         if (J < 0) {
           continue;
         }
-
         Vector impulse = J * gradient;
         r->apply_impulse(impulse, p.pos);
 
@@ -388,17 +413,12 @@ void MPM<dim>::rigid_body_levelset_collision(real t, real delta_t) {
 
 template void MPM<2>::rigidify(real dt);
 template void MPM<3>::rigidify(real dt);
-
 template std::unique_ptr<RigidBody<2>> MPM<2>::create_rigid_body(Config config);
 template std::unique_ptr<RigidBody<3>> MPM<3>::create_rigid_body(Config config);
-
 template void MPM<2>::advect_rigid_bodies(real dt);
 template void MPM<3>::advect_rigid_bodies(real dt);
-
 template void MPM<2>::rigid_body_levelset_collision(real t, real delta_t);
 template void MPM<3>::rigid_body_levelset_collision(real t, real delta_t);
-
 template void MPM<2>::add_rigid_particle(Config config);
 template void MPM<3>::add_rigid_particle(Config config);
-
 TC_NAMESPACE_END

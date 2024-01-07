@@ -163,9 +163,9 @@ class DistanceArticulation : public Articulation<dim> {
     return "distance";
   }
 };
-
 TC_REGISTER_ARTICULATION(Distance);
 
+// axial rotation articulation -------------------------------------------------
 template <int dim>
 class AxialRotationArticulation : public Articulation<dim> {
  public:
@@ -174,27 +174,25 @@ class AxialRotationArticulation : public Articulation<dim> {
   using Base::obj;
   using Vector = VectorND<dim, real>;
   using TorqueType = typename AngularVelocity<dim>::ValueType;
-
   DistanceArticulation<dim> distance_articulations[2];
   Vector3 axis;
   TC_IO_DEF_WITH_BASE(distance_articulations, axis);
-
   void initialize(const Config &config) override {
     obj[0] = config.get_ptr<RigidBodyType>("obj0");
     obj[1] = config.get_ptr<RigidBodyType>("obj1");
     auto offset0 = config.get<Vector>("offset0", Vector(0.0_f));
-
+    // 3d
     TC_STATIC_IF(dim == 3) {
       auto input_axis = normalized(config.get<Vector3>("axis"));
       axis = transform(inversed(this->obj[1]->get_centroid_to_world()),
                        input_axis, 0);
     }
     TC_STATIC_END_IF
-
     Vector offset = obj[0]->position + offset0 - obj[1]->position;
     for (int i = 0; i < 2; i++) {
       Config config_ = config;
       config_.set("penalty", config.get("penalty", 1e3_f));
+      // 3d
       TC_STATIC_IF(dim == 3) {
         auto input_axis = normalized(config.get<Vector3>("axis"));
         Vector axial_offset = input_axis * config.get("axis_length", 0.1_f);
@@ -214,23 +212,21 @@ class AxialRotationArticulation : public Articulation<dim> {
       distance_articulations[i].initialize(config_);
     }
   }
-
   void project() const override {
     distance_articulations[0].project();
     distance_articulations[1].project();
   }
-
   void penalize(real delta_t) const override {
     distance_articulations[0].penalize(delta_t);
     distance_articulations[1].penalize(delta_t);
   }
-
   std::string get_name() const override {
     return "axial_rotation";
   }
 };
 TC_REGISTER_ARTICULATION(AxialRotation);
 
+// motor -----------------------------------------------------------------------
 template <int dim>
 class MotorArticulation : public Articulation<dim> {
  public:
@@ -281,6 +277,7 @@ class MotorArticulation : public Articulation<dim> {
 };
 TC_REGISTER_ARTICULATION(Motor);
 
+// stepper ---------------------------------------------------------------------
 template <int dim>
 class StepperArticulation : public Articulation<dim> {
  public:
@@ -289,12 +286,10 @@ class StepperArticulation : public Articulation<dim> {
   using Base::obj;
   using Vector = VectorND<dim, real>;
   using TorqueType = typename AngularVelocity<dim>::ValueType;
-
   real angular_velocity;
   bool is_left;
   AxialRotationArticulation<dim> axial_rotation_articulation;
   TC_IO_DEF_WITH_BASE(angular_velocity, is_left, axial_rotation_articulation);
-
   void initialize(const Config &config) override {
     obj[0] = config.get_ptr<RigidBodyType>("obj0");
     obj[1] = config.get_ptr<RigidBodyType>("obj1");
@@ -302,27 +297,28 @@ class StepperArticulation : public Articulation<dim> {
     is_left = config.get("is_left", false);
     angular_velocity = config.get<real>("angular_velocity", 0.0_f);
   }
-
   void apply(real delta_t) const override {
     axial_rotation_articulation.apply(delta_t);
   }
-
   void project() const override {
     axial_rotation_articulation.project();
-
     TorqueType torque;
     auto current_vel =
         obj[0]->angular_velocity.value - obj[1]->angular_velocity.value;
+    // 2d
     TC_STATIC_IF(dim == 2) {
       TC_NOT_IMPLEMENTED;
       torque = (angular_velocity - current_vel) *
                (this->obj[0]->inertia + this->obj[1]->inertia);
     }
+    // 3d
     TC_STATIC_ELSE {
-      Vector3 axis = normalized(transform(this->obj[1]->get_centroid_to_world(),
+      Vector3 axis = normalized(
+                            transform(this->obj[1]->get_centroid_to_world(),
                                           axial_rotation_articulation.axis, 0));
 
-      auto correction_vel_projected = angular_velocity - dot(current_vel, axis);
+      auto correction_vel_projected =
+                              angular_velocity - dot(current_vel, axis);
       torque = inversed(this->obj[0]->get_transformed_inversed_inertia() +
                         this->obj[1]->get_transformed_inversed_inertia()) *
                (axis * correction_vel_projected);
@@ -331,11 +327,9 @@ class StepperArticulation : public Articulation<dim> {
     obj[0]->apply_torque(torque);
     obj[1]->apply_torque(-torque);
   }
-
   void penalize(real delta_t) const override {
     axial_rotation_articulation.penalize(delta_t);
   }
-
   void update_parameters(real param1, real param2, real param3) override {
     param1 -= 4._f;
     if (param1 > 1.5)
@@ -345,11 +339,9 @@ class StepperArticulation : public Articulation<dim> {
     else
       angular_velocity = -10;
   }
-
   std::string get_name() const override {
     return "stepper";
   }
 };
 TC_REGISTER_ARTICULATION(Stepper);
-
 TC_NAMESPACE_END

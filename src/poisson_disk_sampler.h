@@ -60,12 +60,19 @@ class PoissonDiskSampler {
     if (dim == 2) {
       min_distance = std::sqrt(v * ((real)2 / 3));
     } else if (dim == 3) {
-      min_distance = std::pow(v * ((real)13 / 18), (real)1 / 3);
+      min_distance = std::pow(v * ((real)13 / 18), (real)1 / 3); ///////////////
     } else {
       TC_ERROR("PoissonDiskSampler only supports 2D and 3D");
     }
     if (specific_min_distance > 0)
       min_distance = specific_min_distance;
+      
+////////////////////////////////////////////////////////////////////////////////
+    std::cout<<" densityTexture="<<density_texture;
+    std::cout<<", dx="<<dx;
+    std::cout<<", maxSampleDnisity="<<ppc;
+    std::cout<<", minDistance="<<min_distance;
+////////////////////////////////////////////////////////////////////////////////
   }
 
   Vectori get_index(const Vector &pos) const {
@@ -141,11 +148,18 @@ class PoissonDiskSampler {
 
  public:
   PoissonDiskSampler() {
-    std::string full_fn =
-        absolute_path(fmt::format("$mpm/periodic_pd_{}d.dat", dim));
+    std::string full_fn;
+    if (dim == 2)
+      full_fn = std::getenv("TAICHI_REPO_DIR") +
+                std::string("/projects/mpm/data/periodic_pd_2d.dat");
+    else if (dim == 3)
+      full_fn = std::getenv("TAICHI_REPO_DIR") +
+                std::string("/projects/mpm/data/periodic_pd_3d.dat");
     std::ifstream is(full_fn, std::ifstream::in | std::ifstream::binary);
-    TC_ASSERT(is.is_open());
     is.read((char *)(&points_size), sizeof(size_t));
+////////////////////////////////////////////////////////////////////////////////
+    std::cout<<"noOfParticles="<<points_size;
+////////////////////////////////////////////////////////////////////////////////
     points_list.resize(points_size * dim);
     is.read((char *)(&points_list[0]), sizeof(float) * points_size * dim);
     is.close();
@@ -180,9 +194,9 @@ class PoissonDiskSampler {
           new_point[d] = points_list[i * dim + d];
         new_point = new_point * min_distance + min_corner;
         for (auto &ind : region_id) {
-          Vector coord =
-              new_point + region_size * (ind.get_ipos().template cast<real>() +
-                                         Vector(0.5_f));
+          Vector coord = new_point +
+                         region_size * (ind.get_ipos().template cast<real>() +
+                                        Vector(0.5_f));
           real sample = density_texture->sample(coord).x;
           if (sample > 0.0_f)
             samples.push_back(coord);
@@ -251,7 +265,7 @@ class PoissonDiskSampler {
     }
   }
 
-  // This function generates precomputed periodic data
+  // call this function to generate precomputed periodic data
   void write_periodic_data() {
     std::vector<Vector> samples;
 
@@ -310,8 +324,13 @@ class PoissonDiskSampler {
         active_list.pop_back();
     }
 
-    std::string full_fn =
-        absolute_path(fmt::format("$mpm/periodic_pd_{}d.dat", dim));
+    std::string full_fn;
+    if (dim == 2)
+      full_fn = std::getenv("TAICHI_REPO_DIR") +
+                std::string("/projects/mpm/data/periodic_pd_2d.dat");
+    else if (dim == 3)
+      full_fn = std::getenv("TAICHI_REPO_DIR") +
+                std::string("/projects/mpm/data/periodic_pd_3d.dat");
     std::ofstream os(full_fn, std::ofstream::out | std::ofstream::binary);
     size_t size = samples.size();
     os.write((char *)(&size), sizeof(size_t));
@@ -327,10 +346,12 @@ class PoissonDiskSampler {
   void sample(std::shared_ptr<Texture> density_texture,
               const RegionND<dim> &region,
               real dx,
-              std::vector<Vector> &samples) {
-    get_ready(density_texture, region, dx);
+              std::vector<Vector> &samples,
+              real minDistAH = -1.0_f) {
+    get_ready(density_texture, region, dx, minDistAH);
 
     // Step 0.
+    // cell size:
     h = min_distance / std::sqrt(real(dim));
 
     // Step 1.
@@ -359,6 +380,7 @@ class PoissonDiskSampler {
       bool found_at_least_one = false;
       for (int i = 0; i < max_attempts; ++i) {
         Vector new_point = get_random_point_nearby(current_point);
+        // non-periodic definition
         if (!periodic) {
           bool outside_box = false;
           for (int d = 0; d < dim; ++d)
@@ -367,6 +389,7 @@ class PoissonDiskSampler {
           if (outside_box)
             continue;
         } else {
+        // periodic definition
           for (int d = 0; d < dim; ++d) {
             if (new_point[d] < min_corner[d])
               new_point[d] += max_corner[d] - min_corner[d];
