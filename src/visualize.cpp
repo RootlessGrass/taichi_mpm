@@ -17,9 +17,12 @@ template <int dim>
 void MPM<dim>::write_partio(const std::string &file_name) const {
   Partio::ParticlesDataMutable *parts = Partio::create();
   Partio::ParticleAttribute posH, vH, mH, typeH, normH, statH, boundH, distH,
-      debugH, indexH, limitH, apicH;
+	  debugH, indexH, limitH, apicH, dgH, JpH, bH;
 
   bool verbose = config_backup.get("verbose_bgeo", false);
+  bool write_dg_e = config_backup.get("write_dg_e", false);
+  bool write_apic_b = config_backup.get("write_apic_b", false);
+  bool write_Jp = config_backup.get("write_Jp", false);
 
   posH = parts->addAttribute("position", Partio::VECTOR, 3);
   typeH = parts->addAttribute("type", Partio::INT, 1);
@@ -35,6 +38,23 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
     distH = parts->addAttribute("boundary_distance", Partio::FLOAT, 1);
     boundH = parts->addAttribute("near_boundary", Partio::INT, 1);
     apicH = parts->addAttribute("apic_frobenius_norm", Partio::FLOAT, 1);
+  }
+  if (write_dg_e) {
+	  dgH = parts->addAttribute("deformation_gradient_elasitc", Partio::FLOAT, 9);
+  }
+  if (write_apic_b) {
+	  bH = parts->addAttribute("apic_B", Partio::FLOAT, 9);
+  }
+  if (write_Jp) {
+	  JpH = parts->addAttribute("Jp", Partio::FLOAT, 1);
+  }
+  {
+	  auto timeH = parts->addFixedAttribute("current_time", Partio::FLOAT, 1);
+	  auto dtH = parts->addFixedAttribute("delta_time", Partio::FLOAT, 1);
+	  auto stepH = parts->addFixedAttribute("substep", Partio::INT, 1);
+	  parts->fixedDataWrite<float32>(timeH)[0] = this->current_t;
+	  parts->fixedDataWrite<float32>(dtH)[0] = base_delta_t;
+	  parts->fixedDataWrite<int>(stepH)[0] = substep_counter;
   }
   auto particles_sorted = particles;
   std::sort(particles_sorted.begin(), particles_sorted.end(),
@@ -69,6 +89,37 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
       dist_p[0] = p->boundary_distance * inv_delta_x;
       apic_p[0] =
           (0.5_f * (p->apic_b - p->apic_b.transposed())).frobenius_norm();
+    }
+    auto write_matrix = [&](const Partio::ParticleAttribute & h, const Matrix & m) {
+	    auto * m_p = parts->dataWrite<float32>(h, idx);
+	    int k = 0;
+	    for (int i = 0; i < 3; i++) {
+	    for (int j = 0; j < 3; j++) {
+		    auto & m_ij = m_p[k++];
+		    m_ij = (i == j) ? 1 : 0;
+		    if (i < dim && j < dim) {
+			    m_ij = m(i,j);
+		    }
+	    }}	    
+    };
+    if (write_dg_e) {
+	    float32 * m_p = parts->dataWrite<float32>(dgH, idx);
+	    int k = 0;
+	    for (int i = 0; i < 3; i++) {
+	    for (int j = 0; j < 3; j++) {
+		    auto & m_ij = m_p[k++];
+		    m_ij = (i == j) ? 1 : 0;
+		    if (i < dim && j < dim) {
+			    m_ij = p->dg_e(i,j);
+		    }
+	    }}
+    }
+    if (write_apic_b) {
+	    write_matrix(bH, p->apic_b);
+    }
+    if (write_Jp) {
+	    float32 * Jp_p = parts->dataWrite<float32>(JpH, idx);
+	    Jp_p[0] = p->get_debug_info()[0];
     }
 
     Vector vel = p->get_velocity();

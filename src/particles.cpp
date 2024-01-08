@@ -286,7 +286,7 @@ class SnowParticle : public MPMParticle<dim> {
   }
 
   Vector3 get_debug_info() const override {
-    return Vector3(0, 2, 0);
+    return Vector3(Jp, 2, 0);
   }
 
   std::string get_name() const override {

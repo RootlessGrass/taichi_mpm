@@ -9,4 +9,4 @@ paper.pdf
 tech.pdf
 *.bbl
 .DS_Store
-
+scripts/test
