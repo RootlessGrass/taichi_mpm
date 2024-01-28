@@ -41,6 +41,7 @@ class MPMParticle : public Unit {
   bool is_rigid_;
   uint32 states;
   int32 id;
+  int material_id;
   real debug;
 
   TC_IO_DEF_VIRT(v_and_m,
@@ -96,6 +97,7 @@ class MPMParticle : public Unit {
     cfl_limit = 1;
     near_boundary_ = false;
     id = 0;
+    material_id = -1;
     is_rigid_ = false;
   }
 

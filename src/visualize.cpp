@@ -13,11 +13,17 @@
 
 TC_NAMESPACE_BEGIN
 
+template <typename T>
+T * fixed_pointer(Partio::ParticlesDataMutable * parts, const char * key, int n) {
+	  auto type = typeid(T) == typeid(float32) ? Partio::FLOAT : Partio::INT;
+	  auto H = parts->addFixedAttribute(key, type, n);
+	  return parts->fixedDataWrite<T>(H);
+}
 template <int dim>
 void MPM<dim>::write_partio(const std::string &file_name) const {
   Partio::ParticlesDataMutable *parts = Partio::create();
   Partio::ParticleAttribute posH, vH, mH, typeH, normH, statH, boundH, distH,
-	  debugH, indexH, limitH, apicH, dgH, JpH, bH;
+	  debugH, indexH, limitH, apicH, dgH, JpH, bH, materialH;
 
   bool verbose = config_backup.get("verbose_bgeo", false);
   bool write_dg_e = config_backup.get("write_dg_e", false);
@@ -28,7 +34,8 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
   typeH = parts->addAttribute("type", Partio::INT, 1);
   indexH = parts->addAttribute("index", Partio::INT, 1);
   limitH = parts->addAttribute("limit", Partio::INT, 3);
-  vH = parts->addAttribute("v", Partio::VECTOR, 3);
+  vH = parts->addAttribute("velocity", Partio::VECTOR, 3);
+  materialH = parts->addAttribute("material", Partio::INT, 1);
 
   if (verbose) {
     mH = parts->addAttribute("m", Partio::VECTOR, 1);
@@ -40,7 +47,7 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
     apicH = parts->addAttribute("apic_frobenius_norm", Partio::FLOAT, 1);
   }
   if (write_dg_e) {
-	  dgH = parts->addAttribute("deformation_gradient_elasitc", Partio::FLOAT, 9);
+	  dgH = parts->addAttribute("deformation_gradient_elastic", Partio::FLOAT, 9);
   }
   if (write_apic_b) {
 	  bH = parts->addAttribute("apic_B", Partio::FLOAT, 9);
@@ -48,14 +55,21 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
   if (write_Jp) {
 	  JpH = parts->addAttribute("Jp", Partio::FLOAT, 1);
   }
+  auto set_fixed = [&](const char * key, auto v) {
+	  using T = decltype(v);
+	  fixed_pointer<T>(parts, key, 1)[0] = v;
+  };
+  set_fixed("current_time", float32(this->current_t));
+  set_fixed("delta_time", float32(base_delta_t));
+  set_fixed("substep", int(substep_counter));
+  set_fixed("delta_x", float32(delta_x));
   {
-	  auto timeH = parts->addFixedAttribute("current_time", Partio::FLOAT, 1);
-	  auto dtH = parts->addFixedAttribute("delta_time", Partio::FLOAT, 1);
-	  auto stepH = parts->addFixedAttribute("substep", Partio::INT, 1);
-	  parts->fixedDataWrite<float32>(timeH)[0] = this->current_t;
-	  parts->fixedDataWrite<float32>(dtH)[0] = base_delta_t;
-	  parts->fixedDataWrite<int>(stepH)[0] = substep_counter;
+	  auto * p = fixed_pointer<int>(parts, "resolution", 3);
+	  p[0] = res[0];
+	  p[1] = res[1];
+	  p[2] = res[2];
   }
+
   auto particles_sorted = particles;
   std::sort(particles_sorted.begin(), particles_sorted.end(),
             [&](ParticlePtr a, ParticlePtr b) {
@@ -103,16 +117,7 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
 	    }}	    
     };
     if (write_dg_e) {
-	    float32 * m_p = parts->dataWrite<float32>(dgH, idx);
-	    int k = 0;
-	    for (int i = 0; i < 3; i++) {
-	    for (int j = 0; j < 3; j++) {
-		    auto & m_ij = m_p[k++];
-		    m_ij = (i == j) ? 1 : 0;
-		    if (i < dim && j < dim) {
-			    m_ij = p->dg_e(i,j);
-		    }
-	    }}
+	    write_matrix(dgH, p->dg_e);
     }
     if (write_apic_b) {
 	    write_matrix(bH, p->apic_b);
@@ -121,6 +126,7 @@ void MPM<dim>::write_partio(const std::string &file_name) const {
 	    float32 * Jp_p = parts->dataWrite<float32>(JpH, idx);
 	    Jp_p[0] = p->get_debug_info()[0];
     }
+    parts->dataWrite<int>(materialH, idx)[0] = p->material_id;
 
     Vector vel = p->get_velocity();
     float32 *v_p = parts->dataWrite<float32>(vH, idx);

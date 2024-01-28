@@ -110,6 +110,7 @@ std::string MPM<dim>::add_particles(const Config &config) {
 
       p->initialize(config_new);
       p->pos = coord;
+      p->material_id = config.get("material_id", -1);
       if (config_backup.get("sand_climb", false)) {
         std::shared_ptr<Texture> texture = AssetManager::get_asset<Texture>(
             config_backup.get<int>("sand_texture"));
@@ -427,6 +428,7 @@ void MPM<dim>::particle_collision_resolution(real t) {
 
 template <int dim>
 void MPM<dim>::step(real dt) {
+	TC_INFO("substep : {}", substep_counter);
   if (dt < 0) {
     substep();
     request_t = this->current_t;
